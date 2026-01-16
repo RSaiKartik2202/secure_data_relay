@@ -41,7 +41,7 @@ class TA:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.connect(("localhost", recipient_port))
-            s.sendall((json.dumps(key_json) + "\n").encode())
+            s.sendall((json.dumps(key_json) + "\n").encode("utf-8"))
             print(f"[TA] Keys sent to port {recipient_port}")
         except ConnectionRefusedError:
             print(f"[TA] Could not connect to port {recipient_port}")
