@@ -1,6 +1,8 @@
 import os
 import socket
 import json
+import time
+import hashlib
 from dotenv import load_dotenv, set_key
 from fastecdsa import curve
 from fastecdsa.point import Point
@@ -45,17 +47,66 @@ class KeyManager:
         pk_y = int(os.getenv("PUBLIC_KEY_Y"))
         self.public_key = Point(pk_x, pk_y, curve.secp256k1)
 
-def decrypt_data():
-    """
-    Decrypts the data received from the edge server.
-    """
-    return
 
-def communicate_with_edge():
-    """
-    Communicates with the edge server to receive re-encrypted data.
-    """
-    return
+class DestinationServer:
+    def __init__(self, key_manager: KeyManager):
+        self.km = key_manager
+
+    def start(self, HOST="127.0.0.1", PORT=8090):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.bind((HOST, PORT))
+            server.listen(5)
+            print("[DT_DST] Listening for re-encrypted data...")
+
+            while True:
+                conn, addr = server.accept()
+                with conn:
+                    self.handle_connection(conn, addr)
+
+    def handle_connection(self, conn, addr):
+        print("[DT_DST] Connection from", addr)
+        buffer = ""
+
+        while True:
+            chunk = conn.recv(4096).decode("utf-8")
+            if not chunk:
+                break
+            buffer += chunk
+            if "\n" in buffer:
+                break
+
+        payload = json.loads(buffer.strip())
+        self.decrypt_and_verify(payload)
+
+    def decrypt_and_verify(self, data):
+        Tproxy = data["Tproxy"]
+        if abs(time.time() - Tproxy) > 10:
+            print("[DT_DST] Dropping message: stale timestamp")
+            return
+
+        CURVE = curve.secp256k1
+        CT_prime = Point(
+            data["c_t_prime"]["x"],
+            data["c_t_prime"]["y"],
+            CURVE
+        )
+        CM = Point(
+            data["c_m"]["x"],
+            data["c_m"]["y"],
+            CURVE
+        )
+
+        sk_dst_inv = pow(self.km.private_key, -1, CURVE.q)
+        M = CM - (sk_dst_inv * CT_prime)
+
+        hM_computed = hashlib.sha256(
+            M.x.to_bytes(32, "big") + M.y.to_bytes(32, "big")
+        ).hexdigest()
+
+        if hM_computed == data["hM"]:
+            print("[DT_DST] Message integrity verified successfully")
+        else:
+            print("[DT_DST] Integrity check failed")
 
 if __name__ == "__main__":
     km = KeyManager()
@@ -65,3 +116,6 @@ if __name__ == "__main__":
     
     print(f"[DT_DST] Private Key: {sk}")
     print(f"[DT_DST] Public Key: ({pk.x}, {pk.y})")
+
+    server = DestinationServer(km)
+    server.start()

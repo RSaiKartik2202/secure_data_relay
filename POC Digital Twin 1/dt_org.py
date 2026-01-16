@@ -1,6 +1,9 @@
 import os
 import socket
 import json
+import secrets
+import hashlib
+import time
 from dotenv import load_dotenv, set_key
 from fastecdsa import curve
 from fastecdsa.point import Point
@@ -11,6 +14,9 @@ class KeyManager:
     def __init__(self):
         self.private_key = None
         self.public_key = None
+        self.curve = curve.secp256k1
+        self.q = self.curve.q          # Curve order
+        self.P = self.curve.G          # Generator point
 
 
     def recv_key_pair(self,HOST = "127.0.0.1",PORT = 8081):
@@ -24,8 +30,15 @@ class KeyManager:
             conn, addr = server.accept()
             with conn:
                 print("[DT_ORG] Connected by", addr)
-                data = conn.recv(4096).decode("utf-8")
-                key_pair = json.loads(data)
+                buffer = ""
+                while True:
+                    chunk = conn.recv(4096).decode("utf-8")
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    if "\n" in buffer:
+                        break
+                key_pair = json.loads(buffer.strip())
                 set_key(".env", "PRIVATE_KEY", str(key_pair["sk_org"]))
                 set_key(".env", "PUBLIC_KEY_X", str(key_pair["pk_org"]["x"]))
                 set_key(".env", "PUBLIC_KEY_Y", str(key_pair["pk_org"]["y"]))
@@ -46,17 +59,64 @@ class KeyManager:
         pk_y = int(os.getenv("PUBLIC_KEY_Y"))
         self.public_key = Point(pk_x, pk_y, curve.secp256k1)
 
-def encrypt_data():
-    """
-    Encrypts the data to be relayed to the destination digital twin.
-    """
-    return
 
-def communicate_with_edge():
-    """
-    Communicates with the edge server to relay encrypted data.
-    """
-    return
+class CryptoManager:
+    def __init__(self, key_manager: KeyManager):
+        self.key_manager = key_manager
+
+    def encrypt_data(self, data):
+        """
+        Encrypts the data to be relayed to the destination digital twin.
+        """
+        q = self.key_manager.q
+        P = self.key_manager.P
+        pk_org = self.key_manager.public_key
+
+        r = secrets.randbelow(q - 1) + 1
+        h = hashlib.sha256(data).digest()
+        h_int = int.from_bytes(h, "big") % q
+        c_t = r * pk_org
+        M = h_int * P
+        c_m = r * P + M
+
+        hM = hashlib.sha256(
+            M.x.to_bytes(32, "big") + M.y.to_bytes(32, "big")
+        ).digest()
+
+        return c_t, c_m, hM
+
+class CommunicationManager:
+    def __init__(self):
+        pass
+    def send_data_to_edge(self, data: bytes, key_manager: KeyManager , EDGE_PORT = 8084):
+        """
+        Communicates with the edge server to relay encrypted data.
+        """
+        cm = CryptoManager(key_manager)
+        c_t, c_m, hM = cm.encrypt_data(data)
+        payload = {
+            "dest_dt_id": "DT_2",
+            "curve": "secp256k1",
+            "c_t": {
+                "x": c_t.x,
+                "y": c_t.y
+            },
+            "c_m": {
+                "x": c_m.x,
+                "y": c_m.y
+            },
+            "hM": hM.hex(),
+            "Torg": time.time()
+        }
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.connect(("localhost", EDGE_PORT))
+        except ConnectionRefusedError:
+            print("[DT_ORG] Edge server not available")
+            return
+        s.sendall((json.dumps(payload) + "\n").encode())
+        s.close()
+        return
 
 if __name__ == "__main__":
     km = KeyManager()
@@ -66,3 +126,7 @@ if __name__ == "__main__":
 
     print(f"[DT_ORG] Private Key: {sk}")
     print(f"[DT_ORG] Public Key: ({public_key.x}, {public_key.y})")
+
+    comms = CommunicationManager()
+    message = input("[DT_ORG] Enter the message to send: ")
+    comms.send_data_to_edge(message.encode("utf-8"), km)
