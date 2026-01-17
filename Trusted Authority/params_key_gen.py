@@ -3,15 +3,24 @@ import secrets
 import socket
 import json
 
+DT_IDS = ["DT_1", "DT_2"]
+DT_REGISTRY = {
+    "DT_1": {"port": 8081},
+    "DT_2": {"port": 8082},
+    "DT_3": {"port": 8086},
+}
+EDGE_PORT = 8083
+
+
 class TA:
     def __init__(self):
         self.curve = secp256k1
         self.P = self.curve.G          # Generator point
         self.q = self.curve.q          # Curve order
 
-    def generate_key_pair_orig(self):
+    def generate_key_pair(self):
         """
-        Generates a public-private key pair for data originator digital twin.
+        Generates a public-private key pair for POC digital twin.
         """
         sk_org = secrets.randbelow(self.q-1) + 1
         pk_org = sk_org * self.P
@@ -25,14 +34,6 @@ class TA:
         reenc_key = (sk_org_inv * sk_dst) % self.q
 
         return reenc_key
-
-    def generate_key_pair_dest(self):
-        """
-        Generates a public-private key pair for data destination digital twin.
-        """
-        sk_dst = secrets.randbelow(self.q-1) + 1
-        pk_dst = sk_dst * self.P
-        return sk_dst, pk_dst
 
     def send_keys(self, key_json, recipient_port):
         """
@@ -52,31 +53,36 @@ class TA:
 
 if __name__ == "__main__":
     ta = TA()
-    sk_org, pk_org = ta.generate_key_pair_orig()
-    sk_dst, pk_dst = ta.generate_key_pair_dest()
-    reenc_key = ta.generate_key_edge(sk_org, sk_dst)
+    dt_keys = {}
+    for dt_id in DT_IDS:
+        sk, pk = ta.generate_key_pair()
+        dt_keys[dt_id] = (sk, pk)
+        ta.send_keys(
+            {
+                "curve": "secp256k1",
+                "dt_id": dt_id,
+                "sk_org": sk,
+                "pk_org": {
+                    "x": pk.x,
+                    "y": pk.y
+                }
+            },
+            DT_REGISTRY[dt_id]["port"]
+        )
 
-    org_keys = {
-        "curve": "secp256k1",
-        "sk_org": sk_org,
-        "pk_org": {
-            "x": pk_org.x,
-            "y": pk_org.y
-        }
-    }
-    ta.send_keys(org_keys, 8081)
+    reenc_payload = {"reenc_keys": []}
+    for org in DT_IDS:
+        for dst in DT_IDS:
+            if org == dst:
+                continue
+            rk = ta.generate_key_edge(
+                dt_keys[org][0],
+                dt_keys[dst][0]
+            )
+            reenc_payload["reenc_keys"].append({
+                "from": org,
+                "to": dst,
+                "rk": rk
+            })
 
-    dst_keys = {
-        "curve": "secp256k1",
-        "sk_dst": sk_dst,
-        "pk_dst": {
-            "x": pk_dst.x,
-            "y": pk_dst.y
-        }
-    }
-    ta.send_keys(dst_keys, 8082)
-
-    edge_key = {
-        "reenc_key": reenc_key
-    }
-    ta.send_keys(edge_key, 8083)
+    ta.send_keys(reenc_payload, EDGE_PORT)

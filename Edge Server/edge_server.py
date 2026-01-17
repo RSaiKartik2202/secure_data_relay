@@ -14,7 +14,7 @@ DESTINATION_REGISTRY = {
 
 class KeyManager:
     def __init__(self):
-        self.reenc_key = None
+        self.reenc_keys = {}
     
 
     def recv_reencrypted_key(self, HOST="127.0.0.1", PORT=8083):
@@ -24,30 +24,41 @@ class KeyManager:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
             server.bind((HOST, PORT))
             server.listen(1)
-            print("[EDGE_SERVER] Waiting for re-encrypted key from Trusted Authority...")
+            print("[EDGE_SERVER] Waiting for re-encryption keys from Trusted Authority...")
             conn, addr = server.accept()
             with conn:
                 print("[EDGE_SERVER] Connected by", addr)
-                data = conn.recv(4096).decode("utf-8")
-                reenc_key_data = json.loads(data)
-                set_key(".env", "REENC_KEY", str(reenc_key_data["reenc_key"]))
-                self.reenc_key = reenc_key_data["reenc_key"]
-                print("[EDGE_SERVER] Re-encrypted key received and stored in .env")
+                buffer = ""
+                while True:
+                    chunk = conn.recv(4096).decode("utf-8")
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    if "\n" in buffer:
+                        break
+                reenc_key_data = json.loads(buffer.strip())
+                for item in reenc_key_data["reenc_keys"]:
+                    key = (item["from"], item["to"])
+                    self.reenc_keys[key] = int(item["rk"])
 
-    def get_reenc_key(self):
+                set_key(".env", "REENC_KEYS", json.dumps(reenc_key_data["reenc_keys"]))
+                print("[EDGE_SERVER] Re-encryption keys loaded and stored in .env")
+
+    def get_reenc_keys(self):
         """
-        Retrieves the stored re-encrypted key from the .env file or receives it from the trusted authority.
+        Retrieves the stored re-encrypted keys from the .env file or receives it from the trusted authority.
         """
-        renc_key_str = os.getenv("REENC_KEY")
-        if not renc_key_str:
+        renc_key_str = os.getenv("REENC_KEYS")
+        if renc_key_str:
+            for item in json.loads(renc_key_str):
+                self.reenc_keys[(item["from"], item["to"])] = int(item["rk"])
+        else:
             self.recv_reencrypted_key()
-            return
-        self.reenc_key = int(renc_key_str)
 
 
 class EdgeServer:
-    def __init__(self, reenc_key, host="127.0.0.1", port=8084):
-        self.reenc_key = reenc_key
+    def __init__(self, reenc_keys, host="127.0.0.1", port=8084):
+        self.reenc_keys = reenc_keys
         self.host = host
         self.port = port
 
@@ -95,7 +106,16 @@ class EdgeServer:
         )
 
         # Re-encryption: C_T' = rk * C_T
-        CT_prime = self.reenc_key * CT
+        src_id = data["src_dt_id"]
+        dst_id = data["dest_dt_id"]
+
+        key = (src_id, dst_id)
+        if key not in self.reenc_keys:
+            print("[EDGE_SERVER] No re-encryption key for", key)
+            return
+
+        rk = self.reenc_keys[key]
+        CT_prime = rk * CT
 
         dst_id = data["dest_dt_id"]
         if dst_id not in DESTINATION_REGISTRY:
@@ -137,8 +157,8 @@ class EdgeServer:
 
 if __name__ == "__main__":
     km = KeyManager()
-    km.get_reenc_key()
-    reenc_key = km.reenc_key
-    print(f"[EDGE_SERVER] Re-encryption Key: {reenc_key}")
-    edge = EdgeServer(km.reenc_key)
+    km.get_reenc_keys()
+    reenc_keys = km.reenc_keys
+    print(f"[EDGE_SERVER] Re-encryption Keys: {reenc_keys}")
+    edge = EdgeServer(km.reenc_keys)
     edge.start()
