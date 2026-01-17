@@ -9,6 +9,7 @@ from fastecdsa.point import Point
 load_dotenv()
 
 DESTINATION_REGISTRY = {
+    "DT_1": ("127.0.0.1", 8085),
     "DT_2": ("127.0.0.1", 8090),
 }
 
